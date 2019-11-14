@@ -5,8 +5,8 @@
  * new page as needed.  A block is pure payload. There are no headers or
  * footers.  Blocks are never coalesced or reused.
  *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * Kaelin Hoang, u0984462
+ * 
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +17,33 @@
 #include "mm.h"
 #include "memlib.h"
 
+/* Basic constants and macros */
 /* always use 16-byte alignment */
 #define ALIGNMENT 16
+#define DSIZE     16 // Double word size in bytes
+#define CHUNKSIZE (1 << 12) // Extend heap by this amount in bytes
+#define WSIZE     8 // Word and header/footer size in bytes
+
+#define MAX(x, y) ((x) > (y)? (x) : (y))
+
+/* Pack a size and allocated bit into a word */
+#define PACK(size, alloc) ((size) | (alloc))
+
+/* Read and write a word at address p */
+#define GET(p)      (*(unsigned int *)(p))
+#define PUT(p, val) (*(unsigned int *)(p) = (val))
+
+/* Read the size and allocated fields from address p */
+#define GET_SIZE(p)  (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
+
+/* Given block ptr bp, compute address of its header and footer */
+#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+/* Given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~(ALIGNMENT-1))
