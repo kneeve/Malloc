@@ -23,7 +23,8 @@
 #define DSIZE     16        // Double word size in bytes
 #define CHUNKSIZE (1 << 12) // Extend heap by this amount in bytes
 #define WSIZE     8         // Word and header/footer size in bytes
-#define OVERHEAD  (sizeof(block_header) + sizeof(block_footer))
+#define OVERHEAD (sizeof(block_header) + sizeof(block_footer))
+#define MAX_PAGE_SIZE 24000
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))
 
@@ -35,8 +36,8 @@
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
 
 /* Read the size and allocated fields from address p */
-#define GET_SIZE(p)  ((block_header *) (p))->size
-#define GET_ALLOC(p) ((block_header *) (p))->allocated
+#define GET_SIZE(p)  (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
 
 /* Given block ptr bp, compute address of its header and footer */
 #define HDRP(bp) ((char *)(bp) - sizeof(block_header))
@@ -52,33 +53,25 @@
 /* rounds up to the nearest multiple of mem_pagesize() */
 #define PAGE_ALIGN(size) (((size) + (mem_pagesize()-1)) & ~(mem_pagesize()-1))
 
-typedef struct {
-  struct free_node* next;
-  struct free_node* prev;
-} free_node;
+typedef struct exp_node{
+  struct exp_node *next;
+  struct exp_node *prev;
+} exp_node;
 
-typedef struct {
-  size_t size;
-  char allocated;
-} block_header;
-
-typedef struct {
-  size_t size;
-  int filler;
-} block_footer;
-
+struct exp_node *exp_head;
+typedef size_t block_header;
+typedef size_t block_footer;
 void *current_avail = NULL;
 int current_avail_size = 0;
-struct free_node *head;
+size_t previous_size;
 
-void *first_bp;
-void *heapp;
+static void *grow_heap(size_t size);
+static void set_allocated(void *bp, size_t size);
+static void *coalesce(void *bp);
 
-
-//static void *coalesce(void *bp);
-//static void *extend_heap(size_t words);
-static void set_allocated(void *b, size_t size);
-static void extend(size_t s);
+static void add(void* bp);
+static void delete(void *bp);
+static void *find_fit(size_t size);
 
 
 /* 
@@ -86,23 +79,8 @@ static void extend(size_t s);
  */
 int mm_init(void)
 {
-  // current_avail = NULL;
-  // current_avail_size = 0;
-
-  //Initilize the heap
-  // heapp = mem_map(PAGE_ALIGN(4 * WSIZE));
-  // PUT(heapp, 0);
-  // PUT(heapp + (1 * WSIZE), PACK(DSIZE, 1));
-  // PUT(heapp + (2 * WSIZE), PACK(DSIZE, 1));
-  // PUT(heapp + (3 * WSIZE), PACK(0, 1));
-  // heapp += (2 * WSIZE);
-
-  // extend(CHUNKSIZE/WSIZE);
-
-  first_bp = mem_map(PAGE_ALIGN(sizeof(block_header)));
-  PUT(HDRP(first_bp), PACK(0, 1));
-
-  mm_malloc(0);
+  exp_head = NULL;
+  grow_heap(mem_pagesize());
   
   return 0;
 }
@@ -113,123 +91,201 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-  // int newsize = ALIGN(size);
-  // void *p;
+  if (size <= 0)
+    return NULL;
   
-  // if (current_avail_size < newsize) {
-  //   current_avail_size = PAGE_ALIGN(newsize);
-  //   current_avail = mem_map(current_avail_size);
-  //   if (current_avail == NULL)
-  //     return NULL;
-  // }
+  void* bp = NULL;
+  size_t full_size = ALIGN(size + OVERHEAD);
 
-  // p = current_avail;
-  // current_avail += newsize;
-  // current_avail_size -= newsize;
-  
-  // return p;
-
-  int new_size = ALIGN(size);
-  void *bp = first_bp;
-
-  while (GET_SIZE(HDRP(bp)) != 0) {
-    if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= new_size)) {
-      set_allocated(bp, new_size);
-      return bp;
-    }
-
-    bp = NEXT_BLKP(bp);
+  if((bp = find_fit(full_size)))
+    set_allocated(bp, full_size);
+  else if ((bp = grow_heap(full_size))) {
+    bp = exp_head;
+    set_allocated(bp, full_size);
   }
 
-  extend(new_size);
-  set_allocated(bp, new_size);
   return bp;
 }
 
 /*
- * mm_free - Coalesce blocks if possible
+ * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr)
 {
-  // size_t size = GET_SIZE(HDRP(ptr));
+  // PUT(HDRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));
+  // PUT(FTRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));
 
-  // PUT(HDRP(ptr), PACK(size, 0));
-  // PUT(FTRP(ptr), PACK(size, 0));
-  // coalesce(ptr);
+  void *bp = coalesce(ptr);
 
-  GET_ALLOC(HDRP(ptr)) = 0;
+  if ((GET_SIZE((HDRP(PREV_BLKP(bp)))) == OVERHEAD) && 
+  (GET_SIZE(FTRP(bp) + DSIZE) == 0)) {
+    if (GET_SIZE(HDRP(bp)) >= (mem_pagesize() * 12)) {
+      delete(bp);
+      mem_unmap(bp - 32, GET_SIZE(HDRP(bp)) + 32);
+    }
+  }
 }
 
 /*
-* ---------------- HELPERS ---------------
+* -------------------- HELPERS --------------------
 */
 
 /*
-* Uses boundary tag coalescing to merge free blocks.
+* When there is not enough available space, grow the heap.
 */
-// static void *coalesce(void *bp) {
-//   size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-//   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-//   size_t size = GET_SIZE(HDRP(bp));
+static void *grow_heap(size_t size) {
+  void *bp;
+  size_t req_size       = PAGE_ALIGN(size + 32);
+  size_t calc_prev_size = PAGE_ALIGN((previous_size * 2) + 32);
+  size_t use_size = MAX(req_size, calc_prev_size);
 
-//   // Prev and next allocated
-//   if (prev_alloc && next_alloc) {
-//     return bp;
-//   }
-
-//   // Prev allocated, next free
-//   else if (prev_alloc && !next_alloc) {
-//     size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-//     PUT(HDRP(bp), PACK(size, 0));
-//     PUT(FTRP(bp), PACK(size, 0));
-//   }
-
-//   // Prev free, next allocated
-//   else if (!prev_alloc && next_alloc) {
-//     size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-//     PUT(FTRP(bp), PACK(size, 0));
-//     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-//     bp = PREV_BLKP(bp);
-//   }
-
-//   // Prev and next free
-//   else {
-//     size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-//     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-//     PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-//     bp = PREV_BLKP(bp);
-//   }
-
-//   return bp;
-// }
-
-// static void *extend_heap(size_t words) {
-//   size_t size = PAGE_ALIGN(words);
-//   void *bp = mem_map(size);
-//   PUT(bp, 0); // Alignment padding
+  // If the requested size is within the max value, update previous size
+  if (use_size <= MAX_PAGE_SIZE)
+    previous_size = use_size;
+  else
+    use_size = previous_size;
   
-//   return bp;
-// }
+  if (!(bp = mem_map(PAGE_ALIGN(use_size + 32))))
+    return NULL;
 
-void extend(size_t new_size) {
-  size_t page_size = PAGE_ALIGN(new_size);
-  void *bp = mem_map(page_size);
+  PUT(bp, 0);
+  PUT(bp + 8, PACK(OVERHEAD, 1));
+  PUT(bp + 16, PACK(OVERHEAD, 1));
 
-  PUT(HDRP(bp), PACK(page_size, 0));
+  // Header
+  PUT(bp + 24, PACK((use_size - 32), 0));
+  // Footer
+  PUT(FTRP(bp + 32), PACK((use_size - 32), 0));
 
-  PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
+  // Terminating block
+  PUT((FTRP(bp + 32) + WSIZE), PACK(0, 1));
+  
+  add(bp + 32);
+  return (bp + 32);
 }
 
 /*
 * Change allocated bit to allocated and does splitting
 */
-void set_allocated(void *bp, size_t size) {
+static void set_allocated(void *bp, size_t size) {
+  if (!bp)
+    return;
+    
   size_t extra_size = GET_SIZE(HDRP(bp)) - size;
 
-  if (extra_size > ALIGN(1 + OVERHEAD)) {
+  if (extra_size > 32) {
+    delete(bp);
     PUT(HDRP(bp), PACK(size, 1));
-    //PUT(FTRP(bp), PACK(size, 1));
+    PUT(FTRP(bp), PACK(size, 1));
     PUT(HDRP(NEXT_BLKP(bp)), PACK(extra_size, 0));
-    //PUT(FTRP(NEXT_BLKP(bp)), PACK(extra_size, 0));
+    PUT(FTRP(NEXT_BLKP(bp)), PACK(extra_size, 0));
+    add(NEXT_BLKP(bp));
   }
+  else {
+    
+    PUT(HDRP(bp), PACK(GET_SIZE(HDRP(bp)), 1));
+    PUT(FTRP(bp), PACK(GET_SIZE(HDRP(bp)), 1));
+    delete(bp);
+  }
+}
+
+/*
+* Uses boundary tag coalescing to merge free blocks.
+*/
+static void *coalesce(void *bp) {
+  size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
+  size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+  size_t size = GET_SIZE(HDRP(bp));
+
+  // Prev and next allocated
+  if (prev_alloc && next_alloc) {
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    
+    add(bp);
+  }
+
+  // Prev allocated, next free
+  else if (prev_alloc && !next_alloc) {
+    size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+    delete(NEXT_BLKP(bp));
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    add(bp);
+  }
+
+  // Prev free, next allocated
+  else if (!prev_alloc && next_alloc) {
+    size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+    PUT(FTRP(bp), PACK(size, 0));
+    PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+    bp = PREV_BLKP(bp);
+  }
+
+  // Prev and next free
+  else {
+    size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+    delete(NEXT_BLKP(bp));
+    PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+    PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+    bp = PREV_BLKP(bp);
+  }
+
+  return bp;
+}
+
+static void add(void *bp) {
+  if (bp == NULL)
+    return;
+  
+  exp_node *node = (exp_node*)bp;
+  node->next = exp_head;
+  
+  if(exp_head)
+    exp_head->prev = node;
+
+  node->prev = NULL;
+  exp_head = node;
+}
+
+static void delete(void *bp) {
+  if (bp == NULL)
+    return;
+
+  exp_node *node = (exp_node*)bp;
+
+  if (node->prev == NULL) {
+    if (node->next == NULL) {
+      exp_head = NULL;
+    }
+    else {
+      exp_head = node->next;
+      exp_head->prev = NULL;
+    }
+  }
+  else {
+    if (node->next == NULL) {
+      node->prev->next = NULL;
+    }
+    else {
+      node->prev->next = node->next;
+      node->next->prev = node->prev;
+    }
+  }
+}
+
+/*
+* Implements a first fit search
+*/
+static void *find_fit(size_t size) {
+  struct exp_node *node = exp_head;
+
+  while (node) {
+    if (GET_SIZE(HDRP(node)) < size)
+      node = node->next;
+    else
+      return (void*)node;
+  }
+
+  return NULL; // No fit
 }
